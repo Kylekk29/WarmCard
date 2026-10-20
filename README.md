@@ -1,4 +1,6 @@
-# Warmcard - AI Greeting Card Generator
+**English** | [简体中文](README.zh-CN.md)
+
+# WarmCard - AI Greeting Card Generator
 
 A Flask-based web application that generates personalized greeting cards using AI (DeepSeek API). Supports multiple occasions, tones, languages, and lengths.
 
@@ -23,8 +25,8 @@ A Flask-based web application that generates personalized greeting cards using A
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/Kylekk29/warmcard.git
-   cd warmcard
+   git clone https://github.com/Kylekk29/WarmCard.git
+   cd WarmCard
    ```
 
 2. Create and activate a virtual environment:
