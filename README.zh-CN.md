@@ -54,7 +54,7 @@
    python app.py
    ```
 
-服务会在 `http://localhost:5000` 启动。
+打开 `http://localhost:5000/` 即可制作贺卡。收件人可以打开同一主机上的 `/card/<id>` 分享链接。任何拿到链接的人都可以查看贺卡。
 
 ## API 接口
 
@@ -83,4 +83,6 @@ POST /api/kyle-card
 
 ## 部署
 
-应用设计为在 Linux 服务器上运行，日志保存在 `/home/xmascard/logs/`。
+可通过 `WARMCARD_LOG_DIR` 指定可写的持久化目录。若 `/home/xmascard/logs/` 已存在，则默认使用该目录，否则使用 `app.py` 旁边的 `logs/`。目录内保存 `shares.json`、统计数据和日志。使用 JSON 存储时，请运行单个应用进程。
+
+运行 `python -m unittest discover -s tests` 可以验证分享流程和 API 行为，无需实际的 DeepSeek 密钥。

@@ -54,7 +54,7 @@ A Flask-based web application that generates personalized greeting cards using A
    python app.py
    ```
 
-The server starts at `http://localhost:5000`.
+Open `http://localhost:5000/` to create a card. Recipients can open the generated `/card/<id>` link on the same host. Anyone with the link can view the card.
 
 ## API Endpoints
 
@@ -83,4 +83,6 @@ POST /api/kyle-card
 
 ## Deployment
 
-The app is designed to run on Linux servers. Logs are stored at `/home/xmascard/logs/`.
+Set `WARMCARD_LOG_DIR` to a writable, persistent directory. WarmCard uses the existing `/home/xmascard/logs/` directory when present and otherwise uses `logs/` beside `app.py`. The directory holds `shares.json`, analytics, and logs. Run a single app process while using JSON storage.
+
+Run `python -m unittest discover -s tests` to check the sharing and API behavior without a live DeepSeek key.

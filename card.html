@@ -965,7 +965,7 @@ async function shareCard() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error);
 
-        const shareUrl = `${window.location.origin}/card/${data.share_id}`;
+        const shareUrl = new URL(data.url, window.location.origin).href;
         dom.shareUrl.value = shareUrl;
         dom.shareSection.classList.add("visible");
         showToast("Share link created! 🔗", "success");

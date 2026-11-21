@@ -6,10 +6,13 @@ import hashlib
 import uuid
 import threading
 import atexit
+from hmac import compare_digest
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from collections import defaultdict
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, jsonify, make_response, render_template, request, send_from_directory, url_for
 from flask_cors import CORS
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -19,7 +22,10 @@ load_dotenv()
 # ========================
 # Logging Configuration
 # ========================
-log_directory = "/home/xmascard/logs"
+app_directory = Path(__file__).resolve().parent
+legacy_log_directory = Path("/home/xmascard/logs")
+default_log_directory = legacy_log_directory if legacy_log_directory.is_dir() else app_directory / "logs"
+log_directory = Path(os.getenv("WARMCARD_LOG_DIR") or default_log_directory).resolve()
 os.makedirs(log_directory, exist_ok=True)
 log_file = os.path.join(log_directory, "kyle-card.log")
 analytics_file = os.path.join(log_directory, "analytics.json")
@@ -63,27 +69,31 @@ log.addHandler(console_handler)
 # ========================
 # Share Store
 # ========================
-share_store = {}
 share_store_lock = threading.Lock()
 
-def save_shares():
-    try:
-        with share_store_lock:
-            with open(share_store_file, 'w', encoding='utf-8') as f:
-                json.dump(share_store, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        log.error(f"Failed to save shares: {e}")
-
 def load_shares():
-    global share_store
     try:
-        if os.path.exists(share_store_file):
-            with open(share_store_file, 'r', encoding='utf-8') as f:
-                share_store = json.load(f)
-    except Exception as e:
-        log.warning(f"Could not load shares: {e}")
+        with open(share_store_file, encoding="utf-8") as f:
+            shares = json.load(f)
+        if not isinstance(shares, dict) or any(not isinstance(card, dict) for card in shares.values()):
+            raise ValueError("Invalid share store")
+        return shares
+    except FileNotFoundError:
+        return {}
 
-load_shares()
+
+def save_shares(shares):
+    temporary_path = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=log_directory, delete=False) as f:
+            temporary_path = Path(f.name)
+            json.dump(shares, f, ensure_ascii=True, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        temporary_path.replace(share_store_file)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 # ========================
 # Analytics
@@ -136,7 +146,6 @@ def auto_save():
     while True:
         time.sleep(300)
         save_analytics()
-        save_shares()
 
 threading.Thread(target=auto_save, daemon=True).start()
 
@@ -400,7 +409,7 @@ LENGTH_CONFIG = {
 # Data Loading
 # ========================
 def load_personalized_data():
-    data_file = "data.json"
+    data_file = app_directory / "data.json"
     if not os.path.exists(data_file):
         return {}
     try:
@@ -411,7 +420,7 @@ def load_personalized_data():
         return {}
 
 def load_prompts():
-    prompts_file = "prompts.json"
+    prompts_file = app_directory / "prompts.json"
     if not os.path.exists(prompts_file):
         log.error("prompts.json not found!")
         return {}
@@ -507,6 +516,31 @@ def after_request(response):
 # Endpoints
 # ========================
 
+@app.get("/")
+def studio():
+    return send_from_directory(app_directory, "card.html")
+
+
+def shared_card_response(body, status=200):
+    response = make_response(body, status)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
+@app.get("/card/<share_id>")
+def view_card(share_id):
+    try:
+        with share_store_lock:
+            data = load_shares().get(share_id)
+    except (OSError, ValueError):
+        log.exception("Could not read the share store")
+        return shared_card_response(render_template("shared_card.html", unavailable=True), 503)
+    if not data:
+        return shared_card_response(render_template("shared_card.html"), 404)
+    return shared_card_response(render_template("shared_card.html", card=data, theme=share_theme(data)))
+
+
 @app.route('/api/occasions', methods=['GET'])
 def get_occasions():
     result = {}
@@ -543,8 +577,9 @@ def health_check():
 
 @app.route('/api/analytics', methods=['GET'])
 def get_analytics():
-    admin_key = request.headers.get('X-Admin-Key')
-    if admin_key != os.getenv('ADMIN_KEY'):
+    admin_key = request.headers.get("X-Admin-Key", "")
+    expected_key = os.getenv("ADMIN_KEY")
+    if not expected_key or not compare_digest(admin_key.encode(), expected_key.encode()):
         return jsonify({"error": "Unauthorized"}), 401
 
     total = {
@@ -578,12 +613,13 @@ def kyle_card():
     analytics_data[today]['total_requests'] += 1
     analytics_data[today]['daily_counts'][today] += 1
 
-    try:
-        data = request.get_json(silent=True)
-        if not data:
-            analytics_data[today]['failed_generations'] += 1
-            return jsonify({"error": "\u65e0\u6548\u8bf7\u6c42\uff1aJSON\u683c\u5f0f\u9519\u8bef"}), 400
+    data = request.get_json(silent=True)
+    fields = ("name", "occasion", "tone", "language", "length", "sender")
+    if not isinstance(data, dict) or any(not isinstance(data.get(field, ""), str) for field in fields):
+        analytics_data[today]['failed_generations'] += 1
+        return jsonify({"error": "无效请求：请输入有效的 JSON 字符串字段"}), 400
 
+    try:
         name = data.get('name', '').strip()
         occasion = data.get('occasion', 'christmas').strip().lower()
         tone = data.get('tone', 'heartfelt').strip().lower()
@@ -696,45 +732,62 @@ Additional requirements:
 
 @app.route('/api/share', methods=['POST'])
 def create_share():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid share data"}), 400
+
+    share_data = {
+        "message": data.get("message"),
+        "name": data.get("name", "Friend"),
+        "occasion": data.get("occasion", "generic"),
+        "tone": data.get("tone", "heartfelt"),
+        "sender": data.get("sender", "Kyle"),
+    }
+    if any(not isinstance(value, str) for value in share_data.values()) or not share_data["message"].strip():
+        return jsonify({"error": "Invalid share data"}), 400
     try:
-        data = request.get_json(silent=True)
-        if not data or 'message' not in data:
-            return jsonify({"error": "Invalid share data"}), 400
+        for value in share_data.values():
+            value.encode("utf-8")
+    except UnicodeEncodeError:
+        return jsonify({"error": "Invalid share data"}), 400
+    share_data["created_at"] = datetime.now().isoformat()
 
-        share_id = str(uuid.uuid4())[:12]
-        share_data = {
-            "message": data["message"],
-            "name": data.get("name", "Friend"),
-            "occasion": data.get("occasion", "generic"),
-            "tone": data.get("tone", "heartfelt"),
-            "sender": data.get("sender", "Kyle"),
-            "created_at": datetime.now().isoformat()
-        }
-
+    share_id = uuid.uuid4().hex
+    try:
         with share_store_lock:
-            share_store[share_id] = share_data
+            shares = load_shares()
+            shares[share_id] = share_data
+            save_shares(shares)
+    except (OSError, ValueError):
+        log.exception("Could not save the share store")
+        return jsonify({"error": "Failed to save share"}), 503
 
-        return jsonify({
-            "share_id": share_id,
-            "url": f"/card/{share_id}",
-            "share_data": share_data
-        })
-    except Exception as e:
-        log.error(f"Share creation failed: {e}")
-        return jsonify({"error": "Failed to create share"}), 500
+    return jsonify({
+        "share_id": share_id,
+        "url": url_for("view_card", share_id=share_id),
+        "share_data": share_data,
+    })
+
+
+def share_theme(data):
+    occasion = data.get("occasion")
+    if not isinstance(occasion, str):
+        return OCCASIONS["generic"]
+    return OCCASIONS.get(occasion, OCCASIONS["generic"])
+
 
 @app.route('/api/share/<share_id>', methods=['GET'])
 def get_share(share_id):
-    with share_store_lock:
-        data = share_store.get(share_id)
+    try:
+        with share_store_lock:
+            data = load_shares().get(share_id)
+    except (OSError, ValueError):
+        log.exception("Could not read the share store")
+        return shared_card_response(jsonify({"error": "Share store unavailable"}), 503)
     if not data:
-        return jsonify({"error": "Share not found"}), 404
+        return shared_card_response(jsonify({"error": "Share not found"}), 404)
 
-    occasion_theme = OCCASIONS.get(data["occasion"], OCCASIONS["generic"])
-    return jsonify({
-        "share_data": data,
-        "theme": occasion_theme
-    })
+    return shared_card_response(jsonify({"share_data": data, "theme": share_theme(data)}))
 
 # Error handlers
 @app.errorhandler(404)
@@ -758,7 +811,6 @@ def internal_error(error):
 def shutdown():
     log.info("Server shutting down...")
     save_analytics()
-    save_shares()
     log.info("Data saved. Goodbye! \U0001f384")
 
 if __name__ == '__main__':
